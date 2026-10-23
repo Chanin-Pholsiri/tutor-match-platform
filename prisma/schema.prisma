@@ -1,0 +1,239 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── ผู้ใช้งานและสิทธิ์ ──────────────────────────────
+
+enum Role {
+  PARENT
+  TUTOR
+  ADMIN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  phone        String?  @unique
+  passwordHash String
+  name         String
+  role         Role
+  lineId       String? // Phase 1: เก็บไว้แสดงผลหลัง accepted เท่านั้น ไม่ใช้ LINE Login/OA
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  sessions Session[]
+
+  tutorProfile TutorProfile?
+
+  requestsSent     LearningRequest[] @relation("ParentRequests")
+  requestsReceived LearningRequest[] @relation("TutorRequests")
+  reviewedProfiles TutorProfile[]    @relation("ReviewedBy")
+
+  reviewsGiven    Review[] @relation("ParentReviews")
+  reviewsReceived Review[] @relation("TutorReviews")
+
+  jobPosts      JobPost[]
+  jobProposals  JobProposal[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+// ── โปรไฟล์ติวเตอร์ ─────────────────────────────────
+
+enum TutorApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model TutorProfile {
+  id              String               @id @default(cuid())
+  userId          String               @unique
+  user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio             String?
+  teachingHistory String?
+  province        String
+  district        String?
+  hourlyRateMin   Decimal              @db.Decimal(10, 2)
+  hourlyRateMax   Decimal              @db.Decimal(10, 2)
+  photoUrl        String?
+  // เอกสารยืนยันตัวตน — เก็บเป็น bytes ในฐานข้อมูลโดยตรง (ไม่ใช้ Vercel Blob)
+  // เพราะเป็นข้อมูลอ่อนไหว (บัตรประชาชน) ต้องเข้าถึงได้เฉพาะเจ้าของโปรไฟล์กับแอดมินเท่านั้น
+  idCardData            Bytes?
+  idCardContentType     String?
+  credentialData        Bytes?
+  credentialContentType String?
+  approvalStatus  TutorApprovalStatus  @default(PENDING)
+  rejectionReason String?
+  reviewedById    String?
+  reviewedBy      User?                @relation("ReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt      DateTime?
+  publishedAt     DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  subjects TutorSubject[]
+
+  @@index([approvalStatus])
+  @@index([province])
+}
+
+// ── วิชาและระดับชั้น ────────────────────────────────
+
+model Subject {
+  id       String @id @default(cuid())
+  name     String @unique
+  category String?
+
+  tutors   TutorSubject[]
+  requests LearningRequest[]
+  jobPosts JobPost[]
+}
+
+enum GradeLevel {
+  KINDERGARTEN
+  PRIMARY
+  SECONDARY
+  HIGH_SCHOOL
+  UNIVERSITY
+  ADULT
+}
+
+model TutorSubject {
+  id        String       @id @default(cuid())
+  tutorId   String
+  tutor     TutorProfile @relation(fields: [tutorId], references: [id], onDelete: Cascade)
+  subjectId String
+  subject   Subject      @relation(fields: [subjectId], references: [id])
+  level     GradeLevel
+
+  @@unique([tutorId, subjectId, level])
+}
+
+// ── คำขอเรียน / เจรจาราคา ────────────────────────────
+
+enum RequestStatus {
+  PENDING
+  COUNTERED
+  ACCEPTED
+  DECLINED
+  CANCELLED
+}
+
+model LearningRequest {
+  id             String        @id @default(cuid())
+  parentId       String
+  parent         User          @relation("ParentRequests", fields: [parentId], references: [id], onDelete: Cascade)
+  tutorId        String
+  tutor          User          @relation("TutorRequests", fields: [tutorId], references: [id], onDelete: Cascade)
+  subjectId      String
+  subject        Subject       @relation(fields: [subjectId], references: [id])
+  level          GradeLevel
+  message        String?
+  proposedPrice  Decimal       @db.Decimal(10, 2)
+  originalPrice  Decimal       @db.Decimal(10, 2)
+  status         RequestStatus @default(PENDING)
+  lastActionById String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  jobPostId String?
+  jobPost   JobPost? @relation(fields: [jobPostId], references: [id], onDelete: SetNull)
+
+  events RequestEvent[]
+  review Review?
+
+  @@index([parentId])
+  @@index([tutorId])
+  @@index([status])
+}
+
+// ── ประกาศหาติวเตอร์ (job board) ──────────────────────
+// ผู้ปกครองโพสต์ความต้องการ แล้วให้ติวเตอร์เข้ามานำเสนอตัวเอง
+
+enum JobPostStatus {
+  OPEN
+  FILLED
+  CLOSED
+}
+
+model JobPost {
+  id          String        @id @default(cuid())
+  parentId    String
+  parent      User          @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  subjectId   String
+  subject     Subject       @relation(fields: [subjectId], references: [id])
+  level       GradeLevel
+  province    String
+  district    String?
+  startDate   DateTime
+  endDate     DateTime
+  schedule    String? // เช่น "เสาร์-อาทิตย์ บ่าย" หรือวันที่ต้องการเรียนโดยละเอียด
+  budgetMin   Decimal?      @db.Decimal(10, 2)
+  budgetMax   Decimal?      @db.Decimal(10, 2)
+  description String?
+  status      JobPostStatus @default(OPEN)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  proposals JobProposal[]
+  requests  LearningRequest[]
+
+  @@index([status])
+  @@index([subjectId])
+  @@index([province])
+}
+
+model JobProposal {
+  id            String   @id @default(cuid())
+  jobPostId     String
+  jobPost       JobPost  @relation(fields: [jobPostId], references: [id], onDelete: Cascade)
+  tutorId       String
+  tutor         User     @relation(fields: [tutorId], references: [id], onDelete: Cascade)
+  message       String
+  proposedPrice Decimal  @db.Decimal(10, 2)
+  createdAt     DateTime @default(now())
+
+  @@unique([jobPostId, tutorId])
+}
+
+// ── รีวิวติวเตอร์ ───────────────────────────────────
+// รีวิวได้ 1 ครั้งต่อคำขอเรียนที่ตกลงราคากันแล้ว (ACCEPTED)
+
+model Review {
+  id        String          @id @default(cuid())
+  requestId String          @unique
+  request   LearningRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  tutorId   String
+  tutor     User            @relation("TutorReviews", fields: [tutorId], references: [id], onDelete: Cascade)
+  parentId  String
+  parent    User            @relation("ParentReviews", fields: [parentId], references: [id], onDelete: Cascade)
+  rating    Int // 1-5
+  comment   String?
+  createdAt DateTime        @default(now())
+
+  @@index([tutorId])
+}
+
+model RequestEvent {
+  id        String          @id @default(cuid())
+  requestId String
+  request   LearningRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  actorId   String
+  action    String // SENT | COUNTERED | ACCEPTED | DECLINED | CANCELLED
+  price     Decimal?        @db.Decimal(10, 2)
+  note      String?
+  createdAt DateTime        @default(now())
+}
